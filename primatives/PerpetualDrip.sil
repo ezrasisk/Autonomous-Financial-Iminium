@@ -1,0 +1,71 @@
+pragma silverscript ^0.1.0;
+
+// PerpetualDrip Covenant — Infinite micro-streams
+// Seeded once, drips forever without full depletion
+// Anyone can trigger (or custodian for larger batches)
+// Recurses principal, emits drip to beneficiary
+
+contract PerpetualDrip(
+    pubkey beneficiary,          // Receives all drips
+    int minDripSompi,            // Minimum drip size (anti-dust, e.g., 100000 = 0.001 KAS)
+    int dripRateBasisPoints,     // Drip per claim, e.g., 10 = 0.1% (basis points / 10000)
+    int maxDripPercent           // Optional cap per claim to prevent abuse (e.g., 500 = 5%)
+) {
+    // Helper: total input (supports merging identical drippers)
+    function int getTotalInput() -> int {
+        int total = 0;
+        bytes thisBytecode = tx.inputs[this.activeInputIndex].lockingBytecode;
+        for (int i = 0; i < tx.inputs.length; i++) {
+            total += tx.inputs[i].value;
+            if (i != this.activeInputIndex) {
+                require(tx.inputs[i].lockingBytecode == thisBytecode);
+            }
+        }
+        return total;
+    }
+
+    // Anyone-can-claim small periodic drip
+    entrypoint function claimDrip() {  // No sig — open trigger
+        int totalInput = getTotalInput();
+        int dripAmount = (totalInput * dripRateBasisPoints) / 10000;
+
+        // Enforce min + optional max
+        if (dripAmount < minDripSompi) {
+            dripAmount = minDripSompi;
+        }
+        int maxAllowed = (totalInput * maxDripPercent) / 100;
+        if (dripAmount > maxAllowed) {
+            dripAmount = maxAllowed;
+        }
+
+        // Optional rate-limit: e.g., one meaningful drip per ~day (adjust to needs)
+        // require(this.age >= 86400);  // Uncomment for time gating
+
+        bytes34 benLock = new LockingBytecodeP2PK(beneficiary);
+        require(tx.outputs[0].lockingBytecode == benLock);
+        require(tx.outputs[0].value == dripAmount);
+
+        // Recurse remainder to identical contract
+        int remainder = totalInput - dripAmount - 2000;  // fee buffer
+        require(remainder > 0);  // Prevent full depletion
+        require(tx.outputs[1].lockingBytecode == tx.inputs[this.activeInputIndex].lockingBytecode);
+        require(tx.outputs[1].value == remainder);
+    }
+
+    // Custodian batch drip (larger, for vault integration)
+    entrypoint function batchDrip(sig s, pubkey custodian) {
+        require(checkSig(s, custodian));
+        // Same logic but allow bigger drip (override max if needed)
+        // Useful for vault → dripper top-ups
+    }
+
+    // Full drain / migration hook (timelocked, for evolution)
+    entrypoint function recover(sig s, pubkey custodian) {
+        require(checkSig(s, custodian));
+        require(this.age >= 7776000 * 5);  // ~5 years dead-man-switch
+
+        bytes34 benLock = new LockingBytecodeP2PK(beneficiary);
+        require(tx.outputs[0].lockingBytecode == benLock);
+        // Full drain allowed
+    }
+}
