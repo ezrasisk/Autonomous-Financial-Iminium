@@ -1,0 +1,38 @@
+pragma silverscript ^0.1.0;
+
+// BasicPredictionHedger — Timelocked Conditional Hedge
+// Capital locked until deadline
+// Post-deadline: Branch based on survival/value (proxy for outcome)
+
+contract BasicPredictionHedger(
+    pubkey bullishBeneficiary,
+    pubkey bearishBeneficiary,
+    int deadlineSeconds,         // e.g., 7776000 ≈ 90 days from creation
+    int bullishThresholdPercent  // If final value >= this % of initial, bullish path
+) {
+    entrypoint function settle() {
+        require(this.age >= deadlineSeconds);
+
+        int inputValue = getTotalInput();  // Supports merge
+
+        // Dummy "outcome" signal: value preservation as price proxy
+        // (Real: future oracle or on-chain data)
+        int preservedPercent = 10000;  // Placeholder—scale to initial somehow
+
+        bytes34 bullLock = new LockingBytecodeP2PK(bullishBeneficiary);
+        bytes34 bearLock = new LockingBytecodeP2PK(bearishBeneficiary);
+
+        if (preservedPercent >= bullishThresholdPercent * 100) {
+            // Bullish: full to beneficiary
+            require(tx.outputs[0].lockingBytecode == bullLock);
+            require(tx.outputs[0].value == inputValue - 2000);
+        } else {
+            // Bearish hedge: split or redirect
+            int half = inputValue / 2;
+            require(tx.outputs[0].lockingBytecode == bullLock);
+            require(tx.outputs[0].value == half);
+            require(tx.outputs[1].lockingBytecode == bearLock);
+            require(tx.outputs[1].value == half - 2000);
+        }
+    }
+}
