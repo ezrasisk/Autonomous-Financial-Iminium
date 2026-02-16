@@ -1,0 +1,118 @@
+pragma silverscript ^0.1.0;
+
+// YieldChasingAgent — Multi-Target Autonomous Migration Wrapper
+// Builds directly on BasicMigrationAgent logic
+// Supports multiple predefined target bytecodes (up to 3 for simplicity in v0.1.0)
+// Anyone can trigger a permissionless migration to a CHOICE of target (via index param)
+// This enables real yield-chasing: off-chain bots/users monitor performance and route capital to the current best lineage
+// Fork % of capital to selected target; remainder stays
+// Perfect bridge to full on-chain intelligence (when introspection/loops land, choice becomes endogenous)
+
+contract YieldChasingAgent(
+    array<bytes> targetBytecodes,  // Array of 1-3 evolved bytecodes (e.g., [conservativeVault, aggressiveDripper, balancedAgent])
+    int migrationDelaySeconds,     // Timelock before any migration (e.g., 2592000 ≈ 30 days)
+    int baseForkPercent,           // Base % to fork per migration (e.g., 2500 = 25.00%)
+    int minForkSompi,              // Minimum absolute fork (anti-dust)
+    int dustLimit                  // Min remainder
+) {
+    // Validate targets at construction (basic sanity)
+    require(targetBytecodes.length >= 1 && targetBytecodes.length <= 3);
+    require(targetBytecodes[0] != empty);
+
+    // Helper: total input value + identical merge enforcement
+    function int getTotalInput() -> int {
+        int total = 0;
+        bytes thisBytecode = tx.inputs[this.activeInputIndex].lockingBytecode;
+        for (int i = 0; i < tx.inputs.length; i++) {
+            total += tx.inputs[i].value;
+            if (i != this.activeInputIndex) {
+                require(tx.inputs[i].lockingBytecode == thisBytecode);
+            }
+        }
+        return total;
+    }
+
+    // Core yield-chasing action: Anyone selects target index and triggers fork
+    entrypoint function chaseYield(int targetIndex) {  // No sig → fully permissionless
+        require(targetIndex >= 0 && targetIndex < targetBytecodes.length);
+        bytes selectedTarget = targetBytecodes[targetIndex];
+
+        require(selectedTarget != empty);
+        require(this.age >= migrationDelaySeconds);
+
+        int totalInput = getTotalInput();
+
+        // Dynamic fork sizing: could be fixed or scaled (here: base + bonus if older = proxy for accrued yield)
+        int forkAmount = (totalInput * baseForkPercent) / 10000;
+        int ageBonus = (this.age / 86400) / 365;  // Rough "years old" bonus (max a few % extra)
+        forkAmount += (totalInput * ageBonus * 100) / 10000;  // +1% per year old, capped naturally
+
+        if (forkAmount < minForkSompi) {
+            forkAmount = minForkSompi;
+        }
+
+        int maxFork = totalInput - dustLimit - 4000;  // Fee + dust buffer
+        if (forkAmount > maxFork) {
+            forkAmount = maxFork;
+        }
+
+        require(forkAmount > 0);
+
+        // Output enforcement:
+        // Output[0]: Fork to selected target
+        require(tx.outputs[0].lockingBytecode == selectedTarget);
+        require(tx.outputs[0].value == forkAmount);
+
+        // Output[1]: Remainder recurses to current agent
+        int remainder = totalInput - forkAmount - 4000;
+        require(remainder >= dustLimit);
+        require(tx.outputs[1].lockingBytecode == tx.inputs[this.activeInputIndex].lockingBytecode);
+        require(tx.outputs[1].value == remainder);
+    }
+
+    // Optional: Split migration across ALL targets proportionally (for diversification)
+    entrypoint function diversify() {
+        require(this.age >= migrationDelaySeconds * 2);  // Longer delay for full rebalance
+        int totalInput = getTotalInput();
+        int numTargets = targetBytecodes.length;
+
+        int perTargetBase = totalInput / numTargets;
+        int remainderTotal = totalInput - 4000;  // Fee buffer
+
+        int outputIndex = 0;
+        for (int i = 0; i < numTargets; i++) {
+            bytes target = targetBytecodes[i];
+            int amount = perTargetBase;
+            if (i == numTargets - 1) {
+                amount = remainderTotal;  // Last gets exact remainder
+            }
+            remainderTotal -= amount;
+
+            require(tx.outputs[outputIndex].lockingBytecode == target);
+            require(tx.outputs[outputIndex].value == amount);
+            require(amount >= minForkSompi);
+
+            outputIndex += 1;
+        }
+
+        // Optional small recurse if dust-level left (or full spend if diversifying everything)
+    }
+
+    // Bonus: Integrated small drip for rewards (anyone-can-claim)
+    entrypoint function rewardDrip(pubkey beneficiary, int dripBasisPoints) {
+        require(this.age >= 86400);  // Daily max
+        int totalInput = getTotalInput();
+        int dripAmount = (totalInput * dripBasisPoints) / 10000;
+        if (dripAmount < minForkSompi) {
+            dripAmount = minForkSompi;
+        }
+
+        bytes34 benLock = new LockingBytecodeP2PK(beneficiary);
+        require(tx.outputs[0].lockingBytecode == benLock);
+        require(tx.outputs[0].value == dripAmount);
+
+        int remainder = totalInput - dripAmount - 2000;
+        require(tx.outputs[1].lockingBytecode == tx.inputs[this.activeInputIndex].lockingBytecode);
+        require(tx.outputs[1].value == remainder);
+    }
+}
