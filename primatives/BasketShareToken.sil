@@ -1,0 +1,88 @@
+pragma silverscript ^0.1.0;
+
+// BasketShareToken — Fungible Share Token Wrapper for Index/Basket Funds
+// Represents proportional ownership in a basket (e.g., our IndexFundAgent)
+// Fungible via variable value: token "amount" = UTXO value in sompi (scalable, no fixed denomination)
+// Transfers via merge/split while preserving total share value
+// Mint/Burn controlled by custodian (pubkey) — in practice, custodian is tied to index fund deposits/redemptions
+// Path to autonomy: Custodian can be migrated to agent-controlled or permissionless with future opcodes
+// Integration: Pair with IndexFundAgent — mint shares on deposit/merge, burn on redemption
+
+contract BasketShareToken(
+    pubkey custodian,            // Mint/burn authority (e.g., initial deployer or multi-sig; future: agent)
+    bytes indexBytecodeHash,     // Keccak/hash of the associated IndexFundAgent bytecode (for reference/verification)
+    int minShareSompi            // Minimum share UTXO size (anti-dust, e.g., 100000000 = 1 KAS worth of shares)
+) {
+    // Helper: Calculate total share input/output (only count UTXOs locked to this exact bytecode)
+    function int getTotalShareInput() -> int {
+        int total = 0;
+        bytes thisBytecode = tx.inputs[this.activeInputIndex].lockingBytecode;
+        for (int i = 0; i < tx.inputs.length; i++) {
+            if (tx.inputs[i].lockingBytecode == thisBytecode) {
+                total += tx.inputs[i].value;
+            }
+        }
+        return total;
+    }
+
+    function int getTotalShareOutput() -> int {
+        int total = 0;
+        bytes thisBytecode = tx.inputs[this.activeInputIndex].lockingBytecode;
+        for (int i = 0; i < tx.outputs.length; i++) {
+            if (tx.outputs[i].lockingBytecode == thisBytecode) {
+                total += tx.outputs[i].value;
+            }
+        }
+        return total;
+    }
+
+    // Standard transfer: Merge/split/payout while preserving total shares
+    entrypoint function transfer() {  // No sig needed → fully bearer/fungible
+        int inputShares = getTotalShareInput();
+        int outputShares = getTotalShareOutput();
+
+        require(outputShares == inputShares);
+        require(inputShares > 0);
+
+        // Enforce min size on new share outputs
+        for (int i = 0; i < tx.outputs.length; i++) {
+            if (tx.outputs[i].lockingBytecode == tx.inputs[this.activeInputIndex].lockingBytecode) {
+                require(tx.outputs[i].value >= minShareSompi);
+            }
+        }
+    }
+
+    // Custodian mint: Create new shares (paired with index deposit in atomic tx or off-chain coordination)
+    entrypoint function mint(sig s, int mintAmount) {
+        require(checkSig(s, custodian));
+        require(mintAmount >= minShareSompi);
+
+        int inputShares = getTotalShareInput();  // Allow mint on top of existing
+        int outputShares = getTotalShareOutput();
+
+        require(outputShares == inputShares + mintAmount);
+
+        // Typically: output[0] = new shares to depositor (thisBytecode), change if needed
+    }
+
+    // Custodian burn: Destroy shares (paired with index redemption)
+    entrypoint function burn(sig s, int burnAmount) {
+        require(checkSig(s, custodian));
+
+        int inputShares = getTotalShareInput();
+        int outputShares = getTotalShareOutput();
+
+        require(inputShares == outputShares + burnAmount);
+        require(burnAmount >= minShareSompi);
+        // No recurse for burned amount → shares destroyed
+    }
+
+    // Optional: Custodian migration (timelocked transfer of authority)
+    entrypoint function migrateCustodian(sig s, pubkey newCustodian) {
+        require(checkSig(s, custodian));
+        require(this.age >= 7776000 * 3);  // ~9 months delay for safety
+
+        // Would require constructing new share token with updated custodian — advanced (use migrateToNewVersion pattern)
+        // Placeholder for future deep_replace
+    }
+}
