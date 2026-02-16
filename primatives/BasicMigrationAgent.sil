@@ -1,0 +1,91 @@
+pragma silverscript ^0.1.0;
+
+// BasicMigrationAgent — Seed for Autonomous Yield-Chasing & Evolution
+// Holds capital in a self-referential covenant (similar to vault pattern)
+// Anyone can trigger a timelocked migration that FORKS capital:
+//   - A percentage moves to a predefined "evolved" target bytecode (higher-yield version)
+//   - Remainder stays in current agent
+// This creates emergent selection pressure: better target bytecodes attract capital migrations over time
+// No custodian signature required for migration → path to full autonomy
+// Integrates with EnhancedFlexibleVault & PerpetualDrip (target can be upgraded vault/dripper)
+
+contract BasicMigrationAgent(
+    bytes targetBytecode,        // Predefined evolved/next-gen bytecode (set at creation; empty = migration disabled)
+    int migrationDelaySeconds,   // Timelock before anyone can migrate (e.g., 7776000 ≈ 90 days)
+    int forkPercent,             // % of capital to fork to new version per migration (e.g., 2000 = 20.00%)
+    int minForkSompi,            // Minimum absolute amount to fork (anti-dust, e.g., 100000000 = 1 KAS)
+    int dustLimit                // Min remainder/recurse amount
+) {
+    // Helper: total input value + merge enforcement (identical agents only)
+    function int getTotalInput() -> int {
+        int total = 0;
+        bytes thisBytecode = tx.inputs[this.activeInputIndex].lockingBytecode;
+        for (int i = 0; i < tx.inputs.length; i++) {
+            total += tx.inputs[i].value;
+            if (i != this.activeInputIndex) {
+                require(tx.inputs[i].lockingBytecode == thisBytecode);
+            }
+        }
+        return total;
+    }
+
+    // Core autonomous action: Anyone can trigger migration after delay
+    entrypoint function migrate() {  // No signature required → permissionless evolution
+        require(targetBytecode != empty);  // Migration enabled
+        require(this.age >= migrationDelaySeconds);  // Timelock enforces gradual evolution
+
+        int totalInput = getTotalInput();
+        int forkAmount = (totalInput * forkPercent) / 10000;  // Basis points style
+
+        // Enforce minimum fork size
+        if (forkAmount < minForkSompi) {
+            forkAmount = minForkSompi;
+        }
+
+        // Cap at 99% to prevent full depletion in one tx
+        int maxFork = totalInput - dustLimit - 3000;  // fee + dust buffer
+        if (forkAmount > maxFork) {
+            forkAmount = maxFork;
+        }
+
+        require(forkAmount > 0);
+
+        // Output enforcement:
+        // Output[0]: Fork to evolved target bytecode
+        require(tx.outputs[0].lockingBytecode == targetBytecode);
+        require(tx.outputs[0].value == forkAmount);
+
+        // Output[1]: Remainder recurses to current agent (self-preservation)
+        int remainder = totalInput - forkAmount - 3000;  // Conservative fee buffer
+        require(remainder >= dustLimit);
+        require(tx.outputs[1].lockingBytecode == tx.inputs[this.activeInputIndex].lockingBytecode);
+        require(tx.outputs[1].value == remainder);
+    }
+
+    // Optional: Full recovery / emergency drain (add custodian if desired)
+    // entrypoint function recover(sig s, pubkey custodian) {
+    //     require(checkSig(s, custodian));
+    //     require(this.age >= migrationDelaySeconds * 10);
+    //     // Full drain to a P2PK or other destination
+    // }
+
+    // Bonus: Hook to seed perpetual drip from this agent
+    // Anyone can trigger a small drip to a beneficiary (composes with PerpetualDrip pattern)
+    entrypoint function dripToBeneficiary(pubkey beneficiary, int dripBasisPoints) {
+        require(this.age >= 86400);  // e.g., once per day max
+        int totalInput = getTotalInput();
+        int dripAmount = (totalInput * dripBasisPoints) / 10000;
+
+        if (dripAmount < minForkSompi) {  // Reuse min as dust floor
+            dripAmount = minForkSompi;
+        }
+
+        bytes34 benLock = new LockingBytecodeP2PK(beneficiary);
+        require(tx.outputs[0].lockingBytecode == benLock);
+        require(tx.outputs[0].value == dripAmount);
+
+        int remainder = totalInput - dripAmount - 2000;
+        require(tx.outputs[1].lockingBytecode == tx.inputs[this.activeInputIndex].lockingBytecode);
+        require(tx.outputs[1].value == remainder);
+    }
+}
