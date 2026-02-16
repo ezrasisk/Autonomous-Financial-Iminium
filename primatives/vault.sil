@@ -1,0 +1,130 @@
+pragma silverscript ^0.1.0;
+
+// EnhancedFlexibleVault v3 — Long-Term AFA Core Container
+// Designed for autonomous evolution, batch dividends, governance, and perpetual hooks
+
+contract EnhancedFlexibleVault(
+    pubkey custodian,            // Primary controller (future: multisig when native)
+    pubkey beneficiary,          // Default payout receiver
+    pubkey heir,                 // Emergency succession key (ultra-long delay)
+    int lockSeconds,             // Base timelock (e.g., 90 days ≈ 7776000 seconds)
+    int instantPercent,          // Instant withdraw max % (e.g., 5)
+    int highPercent,             // Above this % requires timelock (e.g., 50)
+    int minInstantSompi,         // Floor for instant thresh
+    int dustLimit,               // Min change/drip size
+    int dripPercentPerPeriod,    // Anyone-can-drip % per period (e.g., 10 = 0.1%, period = lockSeconds)
+    bytes futureVersionBytecode  // Optional new bytecode for migration (empty = disabled)
+) {
+    // Helper: total input value + merge enforcement
+    function int getTotalInput() -> int {
+        int total = 0;
+        bytes thisBytecode = tx.inputs[this.activeInputIndex].lockingBytecode;
+        for (int i = 0; i < tx.inputs.length; i++) {
+            total += tx.inputs[i].value;
+            if (i != this.activeInputIndex) {
+                require(tx.inputs[i].lockingBytecode == thisBytecode);
+            }
+        }
+        return total;
+    }
+
+    // Primary: Flexible withdraw with batch/split support
+    entrypoint function withdraw(sig s) {
+        require(checkSig(s, custodian));
+
+        int totalInput = getTotalInput();
+        int instantThresh = max((totalInput * instantPercent) / 100, minInstantSompi);
+        int highThresh = (totalInput * highPercent) / 100;
+
+        int totalWithdraw = 0;
+        int outputIndex = 0;
+
+        // Batch payouts: iterate outputs until we hit change or end
+        while (outputIndex < tx.outputs.length) {
+            bytes outLock = tx.outputs[outputIndex].lockingBytecode;
+            int outVal = tx.outputs[outputIndex].value;
+
+            // Allow payouts to beneficiary OR heir (for succession planning)
+            bytes34 benLock = new LockingBytecodeP2PK(beneficiary);
+            bytes34 heirLock = new LockingBytecodeP2PK(heir);
+            require(outLock == benLock || outLock == heirLock);
+
+            totalWithdraw += outVal;
+
+            // Per-output tier check (conservative: any large single payout triggers timelock)
+            if (outVal > highThresh) {
+                require(this.age >= lockSeconds);
+            }
+
+            outputIndex += 1;
+
+            // Break if we hit change output (self-referential)
+            if (outLock == thisBytecode && outVal >= dustLimit) {
+                break;
+            }
+        }
+
+        // Overall withdraw can't exceed instantThresh without timelock
+        if (totalWithdraw > instantThresh && totalWithdraw <= highThresh) {
+            // Medium batch: allowed instant
+        } else if (totalWithdraw > highThresh) {
+            require(this.age >= lockSeconds);
+        }
+
+        // Change enforcement (if any remainder)
+        int estimatedFee = 3000;
+        int changeAmount = totalInput - totalWithdraw - estimatedFee;
+        if (changeAmount >= dustLimit) {
+            require(tx.outputs[outputIndex].lockingBytecode == thisBytecode);
+            require(tx.outputs[outputIndex].value == changeAmount);
+        }
+    }
+
+    // Anyone-can-drip small periodic yield (seeds perpetual economy)
+    entrypoint function drip() {  // No sig required
+        int totalInput = getTotalInput();  // Supports merge during drip
+        int dripAmount = (totalInput * dripPercentPerPeriod) / 10000;  // e.g., 0.1% = 10
+
+        require(dripAmount >= dustLimit);
+        require(this.age >= lockSeconds);  // Once per period
+
+        // Output[0]: drip to beneficiary, Output[1]: recurse remainder
+        bytes34 benLock = new LockingBytecodeP2PK(beneficiary);
+        require(tx.outputs[0].lockingBytecode == benLock);
+        require(tx.outputs[0].value == dripAmount);
+
+        int remainder = totalInput - dripAmount - 2000;
+        require(tx.outputs[1].lockingBytecode == tx.inputs[this.activeInputIndex].lockingBytecode);
+        require(tx.outputs[1].value == remainder);
+    }
+
+    // Timelocked parameter governance (path to evolution)
+    entrypoint function updateParams(sig s, int newInstantPercent, int newHighPercent) {
+        require(checkSig(s, custodian));
+        require(this.age >= lockSeconds * 2);
+
+        // In current Silverscript: can't mutate state, so this would require migration to new contract
+        // Placeholder — real implementation via migrateToNewVersion
+    }
+
+    // Version migration / agent fork
+    entrypoint function migrateToNewVersion(sig s) {
+        require(checkSig(s, custodian));
+        require(this.age >= lockSeconds * 3);
+        require(futureVersionBytecode != empty);
+
+        // Full or partial migration to new bytecode
+        int totalInput = getTotalInput();
+        require(tx.outputs[0].lockingBytecode == futureVersionBytecode);
+        // Allow split: old + new versions coexist
+    }
+
+    // Emergency heir succession
+    entrypoint function heirRecover(sig s) {
+        require(checkSig(s, heir));
+        require(this.age >= lockSeconds * 20);  // ~5 years
+
+        bytes34 heirLock = new LockingBytecodeP2PK(heir);
+        require(tx.outputs[0].lockingBytecode == heirLock);
+    }
+}
