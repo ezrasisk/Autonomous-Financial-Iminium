@@ -1,0 +1,42 @@
+pragma silverscript ^0.1.0;
+
+// EntangledPair — Basic 2-UTXO Correlation Covenant
+// Requires exactly two identical-script inputs
+// Enforces proportional or mirrored outputs (e.g., 50/50 split or winner-take-all)
+// Anyone can "collapse" the pair with rules
+
+contract EntangledPair(
+    pubkey beneficiaryA,         // Receiver for output A
+    pubkey beneficiaryB,         // Receiver for output B
+    int splitPercentA,           // % to A (e.g., 5000 = 50.00%; 10000 = all-to-A)
+    int collapseDelaySeconds     // Optional timelock for collapse
+) {
+    // Enforce exactly two identical inputs
+    require(tx.inputs.length == 2);
+    bytes thisBytecode = tx.inputs[this.activeInputIndex].lockingBytecode;
+    require(tx.inputs[0].lockingBytecode == thisBytecode);
+    require(tx.inputs[1].lockingBytecode == thisBytecode);
+
+    // Total paired value
+    int totalValue = tx.inputs[0].value + tx.inputs[1].value;
+
+    // Optional timelock
+    require(this.age >= collapseDelaySeconds);
+
+    // Core anyone-can-collapse entrypoint
+    entrypoint function collapse() {
+        int amountA = (totalValue * splitPercentA) / 10000;
+        int amountB = totalValue - amountA - 4000;  // Fee buffer
+
+        bytes34 lockA = new LockingBytecodeP2PK(beneficiaryA);
+        bytes34 lockB = new LockingBytecodeP2PK(beneficiaryB);
+
+        require(tx.outputs[0].lockingBytecode == lockA);
+        require(tx.outputs[0].value == amountA);
+        require(tx.outputs[1].lockingBytecode == lockB);
+        require(tx.outputs[1].value == amountB);
+    }
+
+    // Optional: Proportional redemption (different %)
+    // Or winner-take-all if splitPercentA = 10000
+}
