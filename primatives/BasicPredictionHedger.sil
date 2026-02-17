@@ -1,33 +1,43 @@
 pragma silverscript ^0.1.0;
 
-// BasicPredictionHedger — Timelocked Conditional Hedge
-// Capital locked until deadline
-// Post-deadline: Branch based on survival/value (proxy for outcome)
-
+// BasicPredictionHedger v2 — Timelocked Conditional Hedge (oracle-ready)
 contract BasicPredictionHedger(
     pubkey bullishBeneficiary,
     pubkey bearishBeneficiary,
-    int deadlineSeconds,         // e.g., 7776000 ≈ 90 days from creation
-    int bullishThresholdPercent  // If final value >= this % of initial, bullish path
+    int deadlineSeconds,          // e.g., 7776000 ≈ 90 days
+    int bullishThresholdPercent   // e.g., 80 = if outcome >= 80% → bullish path
 ) {
+    // Helper: total input value (now correct Silverscript loop)
+    function int getTotalInput() -> int {
+        int total = 0;
+        for(i, 0, tx.inputs.length) {
+            total = total + tx.inputs[i].value;
+        }
+        return total;
+    }
+
     entrypoint function settle() {
         require(this.age >= deadlineSeconds);
 
-        int inputValue = getTotalInput();  // Supports merge
+        int inputValue = getTotalInput();
 
-        // Dummy "outcome" signal: value preservation as price proxy
-        // (Real: future oracle or on-chain data)
-        int preservedPercent = 10000;  // Placeholder—scale to initial somehow
+        // === OUTCOME SIGNAL (oracle-ready placeholder) ===
+        // Current: simple value-preservation proxy
+        // Future oracle integration (post-May HF or native oracles):
+        //   - Add an extra "oracle input" in the spending tx
+        //   - Replace next line with: int outcomeSignal = tx.inputs[1].value; // oracle feed
+        //   - Then: if (outcomeSignal >= bullishThresholdPercent * 100) { ... }
+        int preservedPercent = 10000;   // 100% = full preservation (replaceable)
 
         bytes34 bullLock = new LockingBytecodeP2PK(bullishBeneficiary);
         bytes34 bearLock = new LockingBytecodeP2PK(bearishBeneficiary);
 
         if (preservedPercent >= bullishThresholdPercent * 100) {
-            // Bullish: full to beneficiary
+            // Bullish path
             require(tx.outputs[0].lockingBytecode == bullLock);
             require(tx.outputs[0].value == inputValue - 2000);
         } else {
-            // Bearish hedge: split or redirect
+            // Bearish hedge path
             int half = inputValue / 2;
             require(tx.outputs[0].lockingBytecode == bullLock);
             require(tx.outputs[0].value == half);
