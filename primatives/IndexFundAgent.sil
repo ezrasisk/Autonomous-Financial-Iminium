@@ -1,66 +1,51 @@
 pragma silverscript ^0.1.0;
 
-// IndexFundAgent — Passive Proportional Index Fund Variant
-// Holds pooled capital in a single covenant UTXO
-// Enforces proportional allocation across a basket of target strategies/bytecodes
-// Supports:
-//   - Merging deposits (identical funds only)
-//   - Permissionless proportional withdrawal (shares burn, users get pro-rata KAS to personal key)
-//   - Anyone-triggered rebalance: splits capital proportionally to predefined target bytecodes (e.g., diversified agent lineages)
-//   - Optional small drip for management fees / rewards
-// This creates a true on-chain passive index fund tracking multiple strategies
-// Perfect for "entangled splits" approximation with current Silverscript (no sibling introspection needed)
-
+// IndexFundAgent v2 — Expanded Basket for AFA v0.2 (Entangled + Hedger ready)
 contract IndexFundAgent(
-    array<bytes> componentBytecodes,   // Basket of targets (e.g., 3-5 agent/vault/dripper lineages)
-    array<int> weightsBasisPoints,      // Proportional weights, sum to 10000 (e.g., [3000, 4000, 3000] = 30/40/30%)
-    pubkey feeBeneficiary,             // Optional fee drip receiver (empty = no fees)
-    int feeBasisPointsPerRebalance,    // e.g., 20 = 0.2% fee per rebalance
-    int rebalanceDelaySeconds,         // Timelock for rebalances (e.g., 2592000 ≈ 30 days)
-    int minOperationSompi              // Anti-dust floor for splits/drips
+    array<bytes> componentBytecodes,   // up to 8 targets
+    array<int> weightsBasisPoints,     // must sum to 10000
+    pubkey feeBeneficiary,
+    int feeBasisPointsPerRebalance,
+    int rebalanceDelaySeconds,
+    int minOperationSompi
 ) {
-    // Validate at construction
+    // Constructor validation
     require(componentBytecodes.length == weightsBasisPoints.length);
-    require(componentBytecodes.length >= 2 && componentBytecodes.length <= 5);  // Reasonable basket size
+    require(componentBytecodes.length >= 2 && componentBytecodes.length <= 8);
+
     int totalWeight = 0;
-    for (int i = 0; i < weightsBasisPoints.length; i++) {
-        totalWeight += weightsBasisPoints[i];
+    for(i, 0, weightsBasisPoints.length) {
+        totalWeight = totalWeight + weightsBasisPoints[i];
     }
     require(totalWeight == 10000);
 
-    // Helper: total input value + identical merge enforcement
+    // Helper: total input value
     function int getTotalInput() -> int {
         int total = 0;
-        bytes thisBytecode = tx.inputs[this.activeInputIndex].lockingBytecode;
-        for (int i = 0; i < tx.inputs.length; i++) {
-            total += tx.inputs[i].value;
-            if (i != this.activeInputIndex) {
-                require(tx.inputs[i].lockingBytecode == thisBytecode);
-            }
+        for(i, 0, tx.inputs.length) {
+            total = total + tx.inputs[i].value;
         }
         return total;
     }
 
-    // Proportional withdrawal: Burn shares, get pro-rata KAS to personal key
-    // Useful for redemptions — anyone can do partial or full
-    entrypoint function redeem(pubkey userBeneficiary) {  // No sig needed for basic redemption
+    // Proportional withdrawal (redeem)
+    entrypoint function redeem(pubkey userBeneficiary) {
         int totalInput = getTotalInput();
-        int redeemAmount = tx.outputs[0].value;  // Assume output[0] = user payout
+        int redeemAmount = tx.outputs[0].value;
 
         require(redeemAmount >= minOperationSompi);
-        require(redeemAmount <= totalInput - minOperationSompi - 4000);  // Leave dust + fee buffer
+        require(redeemAmount <= totalInput - minOperationSompi - 4000);
 
         bytes34 userLock = new LockingBytecodeP2PK(userBeneficiary);
         require(tx.outputs[0].lockingBytecode == userLock);
 
-        // Recurse remainder to identical fund (share burn)
         int remainder = totalInput - redeemAmount - 4000;
         require(remainder >= minOperationSompi);
         require(tx.outputs[1].lockingBytecode == tx.inputs[this.activeInputIndex].lockingBytecode);
         require(tx.outputs[1].value == remainder);
     }
 
-    // Core index action: Anyone-triggered rebalance to basket components
+    // Core rebalance (anyone can call after delay)
     entrypoint function rebalance() {
         require(this.age >= rebalanceDelaySeconds);
 
@@ -71,44 +56,36 @@ contract IndexFundAgent(
             require(feeAmount >= minOperationSompi);
         }
 
-        int allocatable = totalInput - feeAmount - 6000;  // Conservative fee buffer
+        int allocatable = totalInput - feeAmount - 6000;
         require(allocatable > 0);
 
         int outputIndex = 0;
 
-        // Optional fee drip first
+        // Fee drip
         if (feeAmount > 0) {
             bytes34 feeLock = new LockingBytecodeP2PK(feeBeneficiary);
             require(tx.outputs[outputIndex].lockingBytecode == feeLock);
             require(tx.outputs[outputIndex].value == feeAmount);
-            outputIndex += 1;
+            outputIndex = outputIndex + 1;
         }
 
-        // Proportional splits to components
+        // Proportional splits
         int accumulated = 0;
-        for (int i = 0; i < componentBytecodes.length; i++) {
+        for(i, 0, componentBytecodes.length) {
             bytes target = componentBytecodes[i];
             int weight = weightsBasisPoints[i];
 
             int amount = (allocatable * weight) / 10000;
             if (i == componentBytecodes.length - 1) {
-                // Last component gets exact remainder to avoid rounding loss
                 amount = allocatable - accumulated;
             }
-            accumulated += amount;
+            accumulated = accumulated + amount;
 
             require(amount >= minOperationSompi);
             require(tx.outputs[outputIndex].lockingBytecode == target);
             require(tx.outputs[outputIndex].value == amount);
 
-            outputIndex += 1;
+            outputIndex = outputIndex + 1;
         }
-
-        // No recurse — full rebalance deploys capital to index components
     }
-
-    // Optional: Small anyone-can-claim fee drip (alternative to per-rebalance)
-    // entrypoint function claimFeeDrip() {
-    //     ...
-    // }
 }
